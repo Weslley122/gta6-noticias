@@ -132,10 +132,8 @@ export default function Noticias() {
                   {numeros.map((n) => (
                     <div key={n.rotulo} className="placar__item">
                       <dt>{n.rotulo}</dt>
-                      <dd>
-                        <span className="placar__valor">{n.valor}</span>
-                        <span className="placar__nota">{n.nota}</span>
-                      </dd>
+                      <dd className="placar__valor">{n.valor}</dd>
+                      <dd className="placar__nota">{n.nota}</dd>
                     </div>
                   ))}
                 </dl>

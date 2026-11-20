@@ -4,6 +4,29 @@ Site de fã pra acompanhar GTA 6 sem precisar abrir dez abas. Junta as notícias
 
 Não tem ligação nenhuma com a Rockstar nem com a Take-Two. É projeto pessoal.
 
+## Como ficou
+
+![Topo do site, com o pôr do sol de Vice City](docs/prints/topo.png)
+
+Logo abaixo do topo vêm as notícias. Fechada, a aba mostra só as três manchetes do dia:
+
+![Aba de notícias fechada](docs/prints/noticias-fechada.png)
+
+Aberta, separa as matérias por assunto e deixa os números do lançamento num painel ao lado da manchete. Cada matéria tem a fonte embaixo, e o que é estimativa ou rumor vem com selo:
+
+![Aba de notícias aberta](docs/prints/noticias-aberta.png)
+
+Os clipes da semana seguem a mesma ideia, com o top 3 à vista e o resto num feed vertical estilo TikTok:
+
+![Clipes da semana](docs/prints/clipes.png)
+
+No celular:
+
+<p>
+  <img src="docs/prints/celular-topo.png" width="280" alt="Topo do site no celular">
+  <img src="docs/prints/celular-noticias.png" width="280" alt="Aba de notícias no celular">
+</p>
+
 ## Rodando na sua máquina
 
 Precisa de Node 18 ou mais novo.
