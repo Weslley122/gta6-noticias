@@ -1,0 +1,326 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  GTA 6 Noticias - site estatico (S3 privado + CloudFront com OAC)
+  e endpoint opcional de newsletter (Lambda Function URL + DynamoDB).
+
+Parameters:
+  EnableNewsletter:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+    Description: Cria a Lambda + DynamoDB para cadastro de e-mail.
+
+  DomainName:
+    Type: String
+    Default: ''
+    Description: Dominio proprio, sem www (ex. gta6noticias.com.br). Vazio = usa so o endereco cloudfront.net.
+  HostedZoneId:
+    Type: String
+    Default: ''
+    Description: ID da hosted zone do Route 53 desse dominio (obrigatorio se DomainName for preenchido).
+  AllowLocalhost:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: Libera http://localhost:5173 no CORS da newsletter. So para testar local; deixe 'false' em producao.
+
+Conditions:
+  Newsletter: !Equals [!Ref EnableNewsletter, 'true']
+  HasDomain: !Not [!Equals [!Ref DomainName, '']]
+  DevLocal: !And [!Condition Newsletter, !Equals [!Ref AllowLocalhost, 'true']]
+
+Resources:
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced # desliga ACLs
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+
+  # Certificado HTTPS do dominio. CloudFront exige que a stack rode em us-east-1.
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Condition: HasDomain
+    Properties:
+      DomainName: !Ref DomainName
+      SubjectAlternativeNames: [!Sub 'www.${DomainName}']
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+        - DomainName: !Sub 'www.${DomainName}'
+          HostedZoneId: !Ref HostedZoneId
+
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: GTA 6 Noticias (fan site)
+        DefaultRootObject: index.html
+        Aliases: !If
+          - HasDomain
+          - [!Ref DomainName, !Sub 'www.${DomainName}']
+          - !Ref AWS::NoValue
+        ViewerCertificate: !If
+          - HasDomain
+          - AcmCertificateArn: !Ref Certificate
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
+        HttpVersion: http2and3
+        PriceClass: PriceClass_All
+        Origins:
+          - Id: s3-site
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OriginAccessControl.Id
+            S3OriginConfig: { OriginAccessIdentity: '' }
+        DefaultCacheBehavior:
+          TargetOriginId: s3-site
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          # Managed-CachingOptimized
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: !Ref SecurityHeaders
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+  # Cabecalhos de seguranca em todas as respostas do site.
+  # CSP: so carrega script/estilo/fonte do proprio site, iframe so do TikTok,
+  # fetch so pra propria origem e pra Lambda da newsletter.
+  SecurityHeaders:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub '${AWS::StackName}-security-headers'
+        SecurityHeadersConfig:
+          ContentSecurityPolicy:
+            Override: true
+            ContentSecurityPolicy: !Sub "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://*.lambda-url.${AWS::Region}.on.aws; frame-src https://www.tiktok.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests"
+          ContentTypeOptions: { Override: true }
+          FrameOptions: { FrameOption: DENY, Override: true }
+          ReferrerPolicy: { ReferrerPolicy: strict-origin-when-cross-origin, Override: true }
+          StrictTransportSecurity: { AccessControlMaxAgeSec: 63072000, IncludeSubdomains: true, Preload: false, Override: true }
+          XSSProtection: { Protection: false, Override: true }
+        CustomHeadersConfig:
+          Items:
+            - Header: Permissions-Policy
+              Value: 'camera=(), microphone=(), geolocation=(), payment=(), usb=()'
+              Override: true
+
+  DnsRecords:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: HasDomain
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      RecordSets:
+        # Z2FMTNQGS7BJTX e o hosted zone ID fixo do CloudFront.
+        - Name: !Ref DomainName
+          Type: A
+          AliasTarget: { DNSName: !GetAtt Distribution.DomainName, HostedZoneId: Z2FMTNQGS7BJTX }
+        - Name: !Ref DomainName
+          Type: AAAA
+          AliasTarget: { DNSName: !GetAtt Distribution.DomainName, HostedZoneId: Z2FMTNQGS7BJTX }
+        - Name: !Sub 'www.${DomainName}'
+          Type: A
+          AliasTarget: { DNSName: !GetAtt Distribution.DomainName, HostedZoneId: Z2FMTNQGS7BJTX }
+        - Name: !Sub 'www.${DomainName}'
+          Type: AAAA
+          AliasTarget: { DNSName: !GetAtt Distribution.DomainName, HostedZoneId: Z2FMTNQGS7BJTX }
+
+  SiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub '${SiteBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}'
+
+  # ---------- Newsletter (opcional) ----------
+  SubscribersTable:
+    Type: AWS::DynamoDB::Table
+    Condition: Newsletter
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: email, AttributeType: S }
+      KeySchema:
+        - { AttributeName: email, KeyType: HASH }
+      SSESpecification: { SSEEnabled: true } # criptografia com chave KMS gerenciada
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+
+  # Contador de tentativas por IP (anti forca bruta/spam). O IP e guardado so
+  # como hash e cada registro se apaga sozinho (TTL).
+  RateLimitTable:
+    Type: AWS::DynamoDB::Table
+    Condition: Newsletter
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: k, AttributeType: S }
+      KeySchema:
+        - { AttributeName: k, KeyType: HASH }
+      TimeToLiveSpecification: { AttributeName: expira, Enabled: true }
+      SSESpecification: { SSEEnabled: true }
+
+  NewsletterRole:
+    Type: AWS::IAM::Role
+    Condition: Newsletter
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: put-subscriber
+          PolicyDocument:
+            Statement:
+              # So grava. A Lambda nao consegue ler nem listar e-mails.
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt SubscribersTable.Arn
+              - Effect: Allow
+                Action: dynamodb:UpdateItem
+                Resource: !GetAtt RateLimitTable.Arn
+
+  NewsletterFunction:
+    Type: AWS::Lambda::Function
+    Condition: Newsletter
+    Properties:
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt NewsletterRole.Arn
+      Timeout: 5
+      MemorySize: 128
+      ReservedConcurrentExecutions: 5
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref SubscribersTable
+          RATE_TABLE: !Ref RateLimitTable
+          SALT: !Ref AWS::StackId
+          ALLOWED_ORIGINS: !Join
+            - ''
+            - - !If
+                - HasDomain
+                - !Sub 'https://${Distribution.DomainName},https://${DomainName},https://www.${DomainName}'
+                - !Sub 'https://${Distribution.DomainName}'
+              - !If [DevLocal, ',http://localhost:5173', '']
+      Code:
+        ZipFile: |
+          const { DynamoDBClient, PutItemCommand, UpdateItemCommand } = require('@aws-sdk/client-dynamodb');
+          const { createHash } = require('crypto');
+          const db = new DynamoDBClient({});
+          const E = process.env;
+          const ORIGENS = (E.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
+          const EMAIL = /^[a-z0-9._%+-]{1,64}@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,24}$/;
+          const LIMITE = 5, JANELA = 600; // 5 envios por IP a cada 10 min
+          const res = (s, b) => ({ statusCode: s, body: JSON.stringify(b), headers: {
+            'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
+          exports.handler = async (ev) => {
+            try {
+              const h = {};
+              for (const [k, v] of Object.entries(ev.headers || {})) h[k.toLowerCase()] = v;
+              const http = (ev.requestContext && ev.requestContext.http) || {};
+              if (http.method !== 'POST') return res(405, { ok: false });
+              // CSRF: so aceita o proprio site e so JSON (form de outro site nao manda JSON sem preflight)
+              if (!ORIGENS.includes(h.origin)) return res(403, { ok: false });
+              if (!String(h['content-type'] || '').startsWith('application/json')) return res(415, { ok: false });
+              let raw = ev.body || '';
+              if (ev.isBase64Encoded) raw = Buffer.from(raw, 'base64').toString('utf8');
+              if (raw.length > 1024) return res(413, { ok: false });
+              let d;
+              try { d = JSON.parse(raw); } catch { d = null; }
+              if (!d || typeof d !== 'object') return res(400, { ok: false, error: 'email invalido' });
+              if (d.site) return res(200, { ok: true }); // honeypot: robo preencheu o campo escondido
+              const email = typeof d.email === 'string' ? d.email.trim().toLowerCase() : '';
+              if (email.length > 254 || !EMAIL.test(email)) return res(400, { ok: false, error: 'email invalido' });
+              const agora = Math.floor(Date.now() / 1000);
+              const ip = createHash('sha256').update(E.SALT + (http.sourceIp || '?')).digest('hex');
+              const c = await db.send(new UpdateItemCommand({
+                TableName: E.RATE_TABLE, Key: { k: { S: ip + ':' + Math.floor(agora / JANELA) } },
+                UpdateExpression: 'ADD n :um SET expira = :exp',
+                ExpressionAttributeValues: { ':um': { N: '1' }, ':exp': { N: String(agora + JANELA * 2) } },
+                ReturnValues: 'UPDATED_NEW' }));
+              if (Number(c.Attributes.n.N) > LIMITE) return res(429, { ok: false });
+              try {
+                await db.send(new PutItemCommand({ TableName: E.TABLE_NAME,
+                  Item: { email: { S: email }, createdAt: { S: new Date(agora * 1000).toISOString() } },
+                  ConditionExpression: 'attribute_not_exists(email)' }));
+              } catch (e) {
+                // E-mail ja cadastrado responde igual a novo: nao revela quem esta na lista.
+                if (e.name !== 'ConditionalCheckFailedException') throw e;
+              }
+              return res(200, { ok: true });
+            } catch (e) {
+              console.error('newsletter falhou:', e.name); // sem e-mail nem stack no log/resposta
+              return res(500, { ok: false });
+            }
+          };
+
+  NewsletterUrl:
+    Type: AWS::Lambda::Url
+    Condition: Newsletter
+    Properties:
+      TargetFunctionArn: !Ref NewsletterFunction
+      AuthType: NONE
+      Cors:
+        AllowMethods: [POST]
+        AllowHeaders: [content-type]
+        AllowCredentials: false
+        MaxAge: 600
+        AllowOrigins:
+          - !Sub 'https://${Distribution.DomainName}'
+          - !If [HasDomain, !Sub 'https://${DomainName}', !Ref AWS::NoValue]
+          - !If [HasDomain, !Sub 'https://www.${DomainName}', !Ref AWS::NoValue]
+          - !If [DevLocal, 'http://localhost:5173', !Ref AWS::NoValue]
+
+  NewsletterUrlPermission:
+    Type: AWS::Lambda::Permission
+    Condition: Newsletter
+    Properties:
+      FunctionName: !Ref NewsletterFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+Outputs:
+  BucketName:
+    Value: !Ref SiteBucket
+  DistributionId:
+    Value: !Ref Distribution
+  SiteUrl:
+    Value: !If [HasDomain, !Sub 'https://${DomainName}', !Sub 'https://${Distribution.DomainName}']
+  NewsletterEndpoint:
+    Condition: Newsletter
+    Value: !GetAtt NewsletterUrl.FunctionUrl
